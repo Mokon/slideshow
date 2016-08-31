@@ -1,0 +1,246 @@
+#!/usr/bin/perl
+# Copyright (C) 2016 David Bond
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# This is a perl script which creates a slideshow based on the contents of the
+# directory in which it is executed. The contents must be in the prescribed
+# format:
+#
+#   A) There must exist a regular file named section_background.jpg in the
+#      current working directory. This file will be used as the background image
+#      for the section header slides.
+#   B) There must exist a directory named music in the current working
+#      directory. This directory must contain at least one music file. The music
+#      files here will be played during the slide show in lexicographic order.
+#      If the music runtime is longer than the slides then this music will be
+#      cut off.
+#   C) There must exist a directory named slides in the current working
+#      directory. This directory must contain a directory structure with the
+#      the slides for the slideshow in the prescribed format:
+#
+#      1) For each file in this directory if the file is a directory then its
+#         name will be used for the section header slide. The directory name
+#         must be in the format <two digits>-<string>. Where the two digits are
+#         numbers used to specify a sorting order and the <string> is used for
+#         the section header slide text. This string must not contain spaces.
+#         Any dashes (-) in this string will be converted to spaces in the
+#         slide text. Each word in this text will be capitalized.
+#      2) For each regular file in this directory the file must be an image
+#         file. This image will be converted to a picture slide in the
+#         slideshow. The name of this file must be in the format
+#         <four digit year>-<two digit month>-<lexicographic sorting string>.
+#         The slide generated from this file will contain a text giving the year
+#         and the month specified in the file name. There must not be any spaces
+#         in the file name.
+#
+#      Each section directory the slides directory will be recursively entered
+#      and iterated with the same rules specified here. The directory tree
+#      is iterated lexicographically in a depth first order. Section header
+#      slides after the first depth in the tree will use a reduced font size
+#      for their text.
+#
+# After this script has been run a file called output.img will be created. This
+# file can be opened with the imagination slideshow editor. Please note
+# imagination tends to segfault if there are any errors in the slideshow
+# project. Also note that there seems to be a bug in imagination around the
+# screen size. This can be fixed by entering file, then going to properties,
+# and setting the project settings to the desired dimensions. After this the
+# project can be exported as a vod formated video.
+
+use strict;
+use warnings;
+
+use Path::Class;
+use DateTime;
+
+# Some common defines you might want to edit
+my $section_header_font_size    = 128;
+my $subsection_header_font_size = 64;
+my $video_format                = 720;
+my $distort_images              = "false";
+my $section_slide_duration      = 2;
+my $picture_slide_duration      = 4;
+my $picture_slide_font_size     = 64;
+my $output_filename             = "output.img";
+
+my $section_background_file = "section_background.jpg";
+my $music_dir               = "music";
+my $slides_dir              = "slides";
+
+sub make_header {
+    my ($num_files) = @_;
+
+    my $ret = <<"HEADER";
+#Imagination 2.0 Slideshow Project - http://imagination.sf.net
+
+[slideshow settings]
+video format=$video_format
+distort images=$distort_images
+background color=0;0;0;
+number of slides=$num_files
+HEADER
+
+    return $ret;
+}
+
+sub make_footer {
+    my $output = "\n[music]\nnumber=";
+
+    my $list;
+    my $i = 1;
+    for my $file ( sort( ( dir($music_dir) )->children() ) ) {
+        die "music file '$file' is directory" if $file->is_dir;
+
+        $list .= "\nmusic_$i=$file";
+        $i++;
+    }
+
+    $i--;
+    return "$output$i$list";
+}
+
+sub make_section_slide_text {
+    my ( $text, $slide_number, $depth ) = @_;
+
+    my $font_size =
+        $depth == 0
+      ? $section_header_font_size
+      : $subsection_header_font_size;
+
+    my $ret = <<"SLIDE";
+
+[slide $slide_number]
+filename=$section_background_file
+angle=0
+duration=$section_slide_duration
+transition_id=-1
+speed=4
+no_points=0
+text=$text
+anim id=0
+anim duration=1
+text pos=4
+placing=0
+font=FreeSerif $font_size
+font color=0;0;0;1;
+font bgcolor=1;1;1;1;
+SLIDE
+
+    return $ret;
+}
+
+sub make_picture_slide_text {
+    my ( $slide, $text, $slide_number ) = @_;
+    my $ret = <<"SLIDE";
+
+[slide $slide_number]
+filename=$slide
+angle=0
+duration=$picture_slide_duration
+transition_id=-1
+speed=4
+no_points=0
+text=$text
+anim id=0
+anim duration=1
+text pos=8
+placing=0
+font=FreeSerif $picture_slide_font_size
+font color=0;0;0;1;
+font bgcolor=1;1;1;1;
+SLIDE
+
+    return $ret;
+}
+
+sub make_picture_slide {
+    my ( $file, $slide_number ) = @_;
+
+    $$slide_number++;
+
+    $file =~ /(\d{4})-(\d{2}).*/
+      or die("bad format for slide file '$file'");
+
+    my $dt = DateTime->new( year => $1, month => $2 );
+
+    return make_picture_slide_text( $file, $dt->strftime("%B %G"),
+        $$slide_number );
+}
+
+sub make_section_slide {
+    my ( $section, $slide_number, $depth ) = @_;
+
+    $$slide_number++;
+
+    $section->basename() =~ /(\d{2})-(.*)/
+      or die( "bad format for directory '" . $section->basename() . "'" );
+    my $section_title = $2;
+    $section_title =~ s/-/ /g;
+    $section_title =~ s/([\w']+)/\u\L$1/g;
+
+    my $output .=
+      make_section_slide_text( $section_title, $$slide_number, $depth );
+
+    for my $file ( sort( $section->children() ) ) {
+        if ( $file->is_dir ) {
+            $output .= make_section_slide( $file, $slide_number, $depth + 1 );
+        }
+        else {
+            $output .= make_picture_slide( $file, $slide_number );
+        }
+    }
+
+    return $output;
+}
+
+sub make_slides {
+    my ( $directory, $slide_number, $depth ) = @_;
+
+    my $output;
+    for my $file ( sort( $directory->children() ) ) {
+        if ( $file->is_dir ) {
+            $output .= make_section_slide( $file, $slide_number, $depth );
+        }
+        else {
+            $output .= make_picture_slide( $file, $slide_number );
+        }
+    }
+
+    return $output;
+}
+
+sub make_slideshow {
+    my $output_file;
+    open( $output_file, '>', $output_filename )
+      or die("open '$output_file' fail");
+
+    my $slide_number = 0;
+    my $output = make_slides( dir("slides"), \$slide_number, 0 );
+
+    print( $output_file make_header( $slide_number - 1 ) );
+    print( $output_file $output );
+    print( $output_file make_footer() );
+
+    close($output_file);
+
+    print("made imagintion slideshow project: $output_filename\n");
+}
+
+make_slideshow();
